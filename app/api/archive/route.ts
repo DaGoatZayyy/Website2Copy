@@ -135,6 +135,13 @@ export async function POST(req: NextRequest) {
     const manifest: { name: string; size: number }[] = [];
     let totalBytes = 0;
     let skipped = 0;
+    const skippedByReason: Record<string, number> = {};
+    const recentResponses: Array<{ path: string; status?: number; contentType?: string; reason: string }> = [];
+    const recordSkip = (reason: string, path: string, extra: { status?: number; contentType?: string } = {}) => {
+      skipped++;
+      skippedByReason[reason] = (skippedByReason[reason] || 0) + 1;
+      if (recentResponses.length < 12) recentResponses.push({ path, reason, ...extra });
+    };
 
     while (queue.length && seen.size < MAX_PAGES && manifest.length < MAX_FILES && totalBytes < MAX_TOTAL_BYTES) {
       const current = queue.shift()!;
@@ -143,27 +150,31 @@ export async function POST(req: NextRequest) {
       let result: Awaited<ReturnType<typeof safeFetch>>;
       try { result = await safeFetch(current); }
       catch (error) {
-        skipped++;
+        recordSkip((error as {code?: string})?.code || "FETCH-UNKNOWN", (() => { try { return new URL(current).pathname; } catch { return "/"; } })());
         log("warn", "FETCH-2001", "Skipped resource after fetch failure", { requestId, host: targetHost, resourceHost: (() => { try { return new URL(current).host; } catch { return "invalid"; } })(), code: (error as {code?: string})?.code || "FETCH-UNKNOWN", message: error instanceof Error ? error.message : "Unknown error" });
         continue;
       }
       const { response, finalUrl } = result;
       if (!response.ok) {
-        skipped++;
+        recordSkip(`HTTP-${response.status}`, finalUrl.pathname, { status: response.status, contentType: response.headers.get("content-type") || undefined });
         log("warn", "HTTP-2001", "Resource returned a non-success HTTP status", { requestId, host: targetHost, status: response.status, resourcePath: finalUrl.pathname });
         continue;
       }
       const type = response.headers.get("content-type") || "application/octet-stream";
-      if (!isHtml(type) && !isFetchableAsset(finalUrl)) continue;
+      if (!isHtml(type) && !isFetchableAsset(finalUrl)) {
+        recordSkip("UNSUPPORTED_CONTENT_TYPE", finalUrl.pathname, { status: response.status, contentType: type });
+        log("warn", "TYPE-2002", "Skipped response because its content type and URL extension are not supported", { requestId, resourcePath: finalUrl.pathname, contentType: type, status: response.status });
+        continue;
+      }
       const declared = Number(response.headers.get("content-length") || 0);
       if (declared > MAX_FILE_BYTES) {
-        skipped++;
+        recordSkip("DECLARED_FILE_TOO_LARGE", finalUrl.pathname, { status: response.status, contentType: type });
         log("warn", "SIZE-4131", "Skipped resource over per-file size limit", { requestId, resourcePath: finalUrl.pathname, declaredBytes: declared });
         continue;
       }
       const buf = Buffer.from(await response.arrayBuffer());
       if (!buf.length || buf.length > MAX_FILE_BYTES || totalBytes + buf.length > MAX_TOTAL_BYTES) {
-        skipped++;
+        recordSkip(!buf.length ? "EMPTY_RESPONSE" : "SIZE_LIMIT", finalUrl.pathname, { status: response.status, contentType: type });
         log("warn", "SIZE-4132", "Skipped empty or oversized response", { requestId, resourcePath: finalUrl.pathname, bytes: buf.length, totalBytes, maxFileBytes: MAX_FILE_BYTES, maxTotalBytes: MAX_TOTAL_BYTES });
         continue;
       }
@@ -211,8 +222,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (!manifest.length) {
-      log("error", "ARCHIVE-4220", "No eligible public files could be archived", { requestId, host: targetHost, skipped, elapsedMs: Date.now() - started });
-      return fail(422, "ARCHIVE-4220", "No public HTML or assets could be fetched. The site may block automated requests or require JavaScript rendering.");
+      const diagnostics = { requestId, host: targetHost, skipped, skippedByReason, recentResponses, elapsedMs: Date.now() - started };
+      log("error", "ARCHIVE-4220", "No eligible public files could be archived", diagnostics);
+      return NextResponse.json({ code: "ARCHIVE-4220", error: "No public HTML or assets could be fetched. Review diagnostics to see why responses were skipped.", diagnostics }, { status: 422, headers: { "Cache-Control": "no-store", "X-Request-Id": requestId } });
     }
     zip.file("ARCHIVE-INFO.txt", [
       "Site Archiver export",
