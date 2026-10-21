@@ -19,8 +19,14 @@ export default function Home() {
    const res=await fetch("/api/archive",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:parsed.toString()})});
    log("debug","HTTP-2000","Archive API responded",{status:res.status,statusText:res.statusText,elapsedMs:Date.now()-started,contentType:res.headers.get("content-type")});
    if(!res.ok) {
-    const body=await res.json().catch(()=>({})); const code=typeof body.code==="string"?body.code:`HTTP-${res.status}`;
+    const body=await res.json().catch(()=>({}));
+    const code=typeof body.code==="string"?body.code:`HTTP-${res.status}`;
     log("error",code,"Archive request rejected",{status:res.status,message:body.error||"No error message"});
+    if (body.diagnostics) {
+      log("error","API-DIAGNOSTICS","Detailed archive failure diagnostics",body.diagnostics);
+      console.table(body.diagnostics.skippedByReason || {});
+      if (Array.isArray(body.diagnostics.recentResponses)) console.table(body.diagnostics.recentResponses);
+    }
     throw new Error(body.error||`Request failed (${res.status}). Check the browser console for the diagnostic code.`);
    }
    const blob=await res.blob(); const disposition=res.headers.get("Content-Disposition")||""; const match=disposition.match(/filename="([^"]+)"/); const filename=match?.[1]||"website-archive.zip";
