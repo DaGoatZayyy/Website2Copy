@@ -48,7 +48,7 @@ async function validatePublicUrl(url: URL) {
   if (version === 4 && isPrivateIPv4(host)) throw Object.assign(new Error("Private network addresses are not allowed."), { code: "SSRF-4002" });
   if (version === 6 && isPrivateIPv6(host)) throw Object.assign(new Error("Private network addresses are not allowed."), { code: "SSRF-4003" });
   if (!version) {
-    let addresses: Awaited<ReturnType<typeof lookup>>;
+    let addresses;
     try { addresses = await lookup(host, { all: true, verbatim: true }); }
     catch { throw Object.assign(new Error("The hostname could not be resolved."), { code: "DNS-4001" }); }
     if (!addresses.length || addresses.some(a => a.family === 4 ? isPrivateIPv4(a.address) : isPrivateIPv6(a.address))) {
